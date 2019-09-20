@@ -227,6 +227,36 @@
 			"revisionTime": "2016-11-15T13:54:11Z"
 		},
 		{
+			"checksumSHA1": "Tatjj6QbdAz1SV8CSPApmOJqgrA=",
+			"path": "github.com/go-redis/redis",
+			"revision": "4b6ad6a95349cf4cc99e18a850195f2ee914b90c",
+			"revisionTime": "2019-09-23T12:39:50Z"
+		},
+		{
+			"path": "github.com/go-redis/redis/v7/internal",
+			"revision": "4b6ad6a95349cf4cc99e18a850195f2ee914b90c"
+		},
+		{
+			"path": "github.com/go-redis/redis/v7/internal/consistenthash",
+			"revision": "4b6ad6a95349cf4cc99e18a850195f2ee914b90c"
+		},
+		{
+			"path": "github.com/go-redis/redis/v7/internal/hashtag",
+			"revision": "4b6ad6a95349cf4cc99e18a850195f2ee914b90c"
+		},
+		{
+			"path": "github.com/go-redis/redis/v7/internal/pool",
+			"revision": "4b6ad6a95349cf4cc99e18a850195f2ee914b90c"
+		},
+		{
+			"path": "github.com/go-redis/redis/v7/internal/proto",
+			"revision": "4b6ad6a95349cf4cc99e18a850195f2ee914b90c"
+		},
+		{
+			"path": "github.com/go-redis/redis/v7/internal/util",
+			"revision": "4b6ad6a95349cf4cc99e18a850195f2ee914b90c"
+		},
+		{
 			"checksumSHA1": "YhswBYH9lPkmLN5kVz3nqlu6K5Q=",
 			"path": "github.com/gocraft/health",
 			"revision": "25b40f8580168c1f905a6dba35d471cdc51ca629",
@@ -299,6 +329,24 @@
 			"path": "github.com/gorilla/websocket",
 			"revision": "b89020ee79b89a7f932c5617d218fc06db382f53",
 			"revisionTime": "2017-12-01T01:43:01Z"
+		},
+		{
+			"checksumSHA1": "x3Hz3DwZpIp521DL8nh9FpOQP/4=",
+			"path": "github.com/hashicorp/go-cleanhttp",
+			"revision": "d3fcbee8e1810ecee4bdbf415f42f84cfd0e3361",
+			"revisionTime": "2019-04-06T16:20:18Z"
+		},
+		{
+			"checksumSHA1": "Iv7QhhSWySasqGcwbFyq0XrgYOQ=",
+			"path": "github.com/hashicorp/go-hclog",
+			"revision": "3a6b159e7c8be95d9af1c989e4dcb730567f5c9c",
+			"revisionTime": "2019-08-26T16:23:21Z"
+		},
+		{
+			"checksumSHA1": "gq2B9Zm6CeMnWZ1t2yaCOSMGWZs=",
+			"path": "github.com/hashicorp/go-retryablehttp",
+			"revision": "e8376ee8390aa6145ec448c023fbdd6e4242f053",
+			"revisionTime": "2019-09-20T16:24:11Z"
 		},
 		{
 			"checksumSHA1": "cJZUWi8GxC1KItxFayZLgZOzaHU=",

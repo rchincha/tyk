@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -22,14 +23,15 @@ import (
 	"github.com/TykTechnologies/tyk/headers"
 	"github.com/TykTechnologies/tyk/rpc"
 
-	"github.com/sirupsen/logrus"
 	circuit "github.com/rubyist/circuitbreaker"
+	"github.com/sirupsen/logrus"
 
 	"github.com/TykTechnologies/gojsonschema"
 	"github.com/TykTechnologies/tyk/apidef"
 	"github.com/TykTechnologies/tyk/config"
 	"github.com/TykTechnologies/tyk/regexp"
 	"github.com/TykTechnologies/tyk/storage"
+	"github.com/go-redis/redis"
 )
 
 //const used by cache middleware
@@ -415,6 +417,37 @@ func (a APIDefinitionLoader) FromRPC(orgId string) ([]*APISpec, error) {
 	}
 
 	return a.processRPCDefinitions(apiCollection)
+}
+
+// FromCloud will connect and download ApiDefintions from a Mongo DB instance.
+func (a APIDefinitionLoader) FromRedis(db config.RedisDBAppConfOptionsConfig) ([]*APISpec, error) {
+	var specs []*APISpec
+	var rdb *redis.Client
+	log.Info("Loading API Specification from redis")
+
+	rdb = redis.NewClient(&redis.Options{
+		Addr:         config.Global().RedisDBAppConfOptions.Host + ":" + strconv.Itoa(config.Global().RedisDBAppConfOptions.Port),
+		Password:     config.Global().RedisDBAppConfOptions.Password,
+		DB:           config.Global().RedisDBAppConfOptions.DB,
+		DialTimeout:  10 * time.Second,
+		ReadTimeout:  30 * time.Second,
+		WriteTimeout: 30 * time.Second,
+	})
+
+	defer rdb.Close()
+
+	// Load API Definition from Redis DB
+	apiKeys, err := rdb.Keys("*").Result()
+	if err != nil {
+		log.Error("Couldn't get api definition from redis db: ", err)
+	}
+	for _, v := range apiKeys {
+		apiDefinition, _ := rdb.Get(v).Result()
+		def := a.ParseDefinition(strings.NewReader(apiDefinition))
+		spec := a.MakeSpec(def, nil)
+		specs = append(specs, spec)
+	}
+	return specs, nil
 }
 
 func (a APIDefinitionLoader) processRPCDefinitions(apiCollection string) ([]*APISpec, error) {
