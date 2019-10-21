@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -140,50 +139,78 @@ type CustomMiddleware struct {
 }
 
 func apiLoader(w http.ResponseWriter, r *http.Request) {
-	m.Lock()
-	{
-		service := mux.Vars(r)["service"]
-		apiName := mux.Vars(r)["apiName"]
-		apiID := service + "-" + apiName
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-		var obj interface{}
-		var code int
+	c1 := make(chan string, 1)
 
-		switch r.Method {
-		// GET remains same - Read apis from memory
-		case "GET":
-			if apiName != "" && service != "" {
-				log.Debug("Requesting API definition for", apiID)
-				obj, code = handleGetAPI(apiID)
-			} else {
-				log.Debug("Requesting API list")
-				obj, code = handleGetAPIList()
-			}
-		case "POST":
-			if r.URL.Path == "/key/refresh" {
-				log.Debug("Key refresh")
-				obj, code = updateKeys(ADD)
-			} else if apiName == "" && service == "" {
-				log.Debug("Creating new definition")
-				obj, code = addOrUpdateApi(r)
-			} else {
-				obj, code = apiError("Can not Add/Update service specific APIs. Use /tyk/api or /tyk/key/refresh endpoint"), http.StatusBadRequest
-			}
-		case "DELETE":
-			if apiName != "" && service != "" {
-				log.Info("Deleting API definition for: ", apiID)
-				obj, code = deleteAPIById(apiID)
-			} else if service != "" && apiName == "" {
-				log.Info("Deleting API definition for service: ", service)
-				obj, code = deleteAPIByService(service)
-			} else {
-				obj, code = apiError("Must specify an /service or service/apiName to delete API"), http.StatusBadRequest
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				log.Info("Cancelling context and releasing mutex")
+				m.Unlock()
+				return
+			default:
+				log.Info("Requesting mutex")
+				m.Lock()
+				defer m.Unlock()
+
+				service := mux.Vars(r)["service"]
+				apiName := mux.Vars(r)["apiName"]
+				apiID := service + "-" + apiName
+
+				var obj interface{}
+				var code int
+
+				switch r.Method {
+				// GET remains same - Read apis from memory
+				case "GET":
+					if apiName != "" && service != "" {
+						log.Debug("Requesting API definition for", apiID)
+						obj, code = handleGetAPI(apiID)
+					} else {
+						log.Debug("Requesting API list")
+						obj, code = handleGetAPIList()
+					}
+				case "POST":
+					if r.URL.Path == "/key/refresh" {
+						log.Debug("Key refresh")
+						obj, code = updateKeys(ADD)
+					} else if apiName == "" && service == "" {
+						log.Debug("Creating new definition")
+						obj, code = addOrUpdateApi(r)
+					} else {
+						obj, code = apiError("Can not Add/Update service specific APIs. Use /tyk/api or /tyk/key/refresh endpoint"), http.StatusBadRequest
+					}
+				case "DELETE":
+					if apiName != "" && service != "" {
+						log.Info("Deleting API definition for: ", apiID)
+						obj, code = deleteAPIById(apiID)
+					} else if service != "" && apiName == "" {
+						log.Info("Deleting API definition for service: ", service)
+						obj, code = deleteAPIByService(service)
+					} else {
+						obj, code = apiError("Must specify an /service or service/apiName to delete API"), http.StatusBadRequest
+					}
+				}
+
+				doJSONWrite(w, code, obj)
+
+				log.Info("Releasing mutex")
+				c1 <- "Done"
+				return
 			}
 		}
+	}()
 
-		doJSONWrite(w, code, obj)
+	select {
+	case res := <-c1:
+		log.Info("Request Done ", res)
+	case <-time.After(10 * time.Second):
+		cancel()
+		log.Info("Could not finish the request :(")
 	}
-	m.Unlock()
 }
 
 func updateKeys(e Event) (interface{}, int) {
@@ -202,56 +229,80 @@ func updateKeys(e Event) (interface{}, int) {
 
 func addOrUpdateApi(r *http.Request) (interface{}, int) {
 	log.Info("Updating/Adding API to redis")
-	c := RedisPool.Get()
+	log.Info("Request connection from redis pool")
+	c := GetRedisConn()
+	log.Info("Acquired connection from redis pool")
 	defer c.Close()
+
+	log.Info("1. called redis connection defer")
 
 	if config.Global().UseDBAppConfigs {
 		log.Error("Rejected new API Definition due to UseDBAppConfigs = true")
 		return apiError("Due to enabled use_db_app_configs, please use the Dashboard API"), http.StatusInternalServerError
 	}
 
+	log.Info("1.1. After config.Global().UseDBAppConfigs")
+
 	var ServApis ServiceAPIS
 
-	if err := json.NewDecoder(r.Body).Decode(&ServApis); err != nil {
-		log.Error("Couldn't decode new API Definition object: ", err)
+	log.Info("1.2. After var ServApis ServiceAPIS")
+
+	data, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		log.Error("Couldn't read request body", err)
 		return apiError("Request malformed"), http.StatusBadRequest
+	} else {
+		err = json.Unmarshal(data, &ServApis)
+		if err != nil {
+			log.Error("Couldn't decode new API Definition object: ", err)
+			return apiError("Request malformed"), http.StatusBadRequest
+		}
 	}
 
+	log.Info("2. Decoded service api")
+
 	//Check if mtls files are present
-	_, err := os.Stat(TykServerCrt)
+	_, err = os.Stat(TykServerCrt)
 	if os.IsNotExist(err) {
 		return apiError("apigw server cert not found. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("3. TykServerCrt present")
 
 	_, err = os.Stat(TykServerKey)
 	if os.IsNotExist(err) {
 		return apiError("apigw server key not found. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("4. TykServerKey present")
 
 	_, err = os.Stat(TykUpstreamPem)
 	if os.IsNotExist(err) {
 		return apiError("mtls upstream pem not found. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("5. TykUpstreamPem present")
 
 	OpenAPI, err := ioutil.ReadFile(APITemplateOpenSpec)
 	if err != nil {
 		return apiError("Internal Error. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("6. APITemplateOpenSpec present")
 
 	JWTAPI, err := ioutil.ReadFile(APITemplateJWTSpec)
 	if err != nil {
 		return apiError("Internal Error. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("7. APITemplateOpenSpec present")
 
 	platform, err := getPlatform(SystemConfigFilePath)
 	if err != nil {
 		return apiError("Could not get platform type"), http.StatusInternalServerError
 	}
+	log.Info("8. getPlatform returned")
 
 	host, err := getInbandIP(SystemConfigFilePath)
 	if err != nil {
 		return apiError("Could not get inband IP"), http.StatusInternalServerError
 	}
+	log.Info("9. getInbandIP returned")
 
 	for service, apis := range ServApis {
 		log.Info("Processing service: ", service)
@@ -420,7 +471,8 @@ func addOrUpdateApi(r *http.Request) (interface{}, int) {
 
 func addOrDeleteJWTKey(e Event) error {
 	var JWTAPIMap = make(map[string]string)
-	c := RedisPool.Get()
+	//c := RedisPool.Get()
+	c := GetRedisConn()
 	defer c.Close()
 
 	apis, err := redis.Strings(c.Do("KEYS", "*"))
@@ -487,8 +539,8 @@ func addOrDeleteJWTKey(e Event) error {
 			} else if count < 3 {
 				log.Warn("Could not verify JWT API Token.. retry")
 			} else {
-				log.Error("Could not add JWT token")
-				return errors.New("Error in updating JWT key")
+				log.Error("Could not add JWT token", jwtMeta.JWTAPIKeyPath)
+				break
 			}
 		}
 	}
@@ -684,8 +736,7 @@ func checkRetry(ctx context.Context, resp *http.Response, err error) (bool, erro
 }
 
 func deleteAPIById(apiID string) (interface{}, int) {
-	c := RedisPool.Get()
-
+	c := GetRedisConn()
 	defer c.Close()
 
 	// Load API Definition from Redis DB
@@ -729,7 +780,9 @@ func deleteAPIById(apiID string) (interface{}, int) {
 }
 
 func deleteAPIByService(service string) (interface{}, int) {
-	c := RedisPool.Get()
+	//c := RedisPool.Get()
+	c := GetRedisConn()
+
 	log.Info("Deleting API from redis for service: ", service)
 
 	defer c.Close()
