@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -140,7 +139,9 @@ type CustomMiddleware struct {
 }
 
 func apiLoader(w http.ResponseWriter, r *http.Request) {
+	log.Info("Requesting mutex")
 	m.Lock()
+	defer m.Unlock()
 	{
 		service := mux.Vars(r)["service"]
 		apiName := mux.Vars(r)["apiName"]
@@ -183,7 +184,7 @@ func apiLoader(w http.ResponseWriter, r *http.Request) {
 
 		doJSONWrite(w, code, obj)
 	}
-	m.Unlock()
+	log.Info("Releasing mutex")
 }
 
 func updateKeys(e Event) (interface{}, int) {
@@ -202,56 +203,85 @@ func updateKeys(e Event) (interface{}, int) {
 
 func addOrUpdateApi(r *http.Request) (interface{}, int) {
 	log.Info("Updating/Adding API to redis")
-	c := RedisPool.Get()
+	log.Info("Request connection from redis pool")
+	c := GetRedisConn()
+	log.Info("Acquired connection from redis pool")
 	defer c.Close()
+
+	log.Info("1. called redis connection defer")
 
 	if config.Global().UseDBAppConfigs {
 		log.Error("Rejected new API Definition due to UseDBAppConfigs = true")
 		return apiError("Due to enabled use_db_app_configs, please use the Dashboard API"), http.StatusInternalServerError
 	}
 
+	log.Info("1.1. After config.Global().UseDBAppConfigs")
+
 	var ServApis ServiceAPIS
 
-	if err := json.NewDecoder(r.Body).Decode(&ServApis); err != nil {
-		log.Error("Couldn't decode new API Definition object: ", err)
+	log.Info("1.2. After var ServApis ServiceAPIS")
+
+	data, err := ioutil.ReadAll(r.Body)
+	if err != nil {
+		log.Error("Couldn't read request body", err)
 		return apiError("Request malformed"), http.StatusBadRequest
+	} else {
+		err = json.Unmarshal(data, &ServApis)
+		if err != nil {
+			log.Error("Couldn't decode new API Definition object", err)
+			return apiError("Request malformed"), http.StatusBadRequest
+		}
 	}
 
+	// if err := json.NewDecoder(r.Body).Decode(&ServApis); err != nil {
+	// 	log.Error("Couldn't decode new API Definition object: ", err)
+	// 	return apiError("Request malformed"), http.StatusBadRequest
+	// }
+
+	log.Info("2. Decoded service api")
+
 	//Check if mtls files are present
-	_, err := os.Stat(TykServerCrt)
+	_, err = os.Stat(TykServerCrt)
 	if os.IsNotExist(err) {
 		return apiError("apigw server cert not found. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("3. TykServerCrt present")
 
 	_, err = os.Stat(TykServerKey)
 	if os.IsNotExist(err) {
 		return apiError("apigw server key not found. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("4. TykServerKey present")
 
 	_, err = os.Stat(TykUpstreamPem)
 	if os.IsNotExist(err) {
 		return apiError("mtls upstream pem not found. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("5. TykUpstreamPem present")
 
 	OpenAPI, err := ioutil.ReadFile(APITemplateOpenSpec)
 	if err != nil {
 		return apiError("Internal Error. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("6. APITemplateOpenSpec present")
 
 	JWTAPI, err := ioutil.ReadFile(APITemplateJWTSpec)
 	if err != nil {
 		return apiError("Internal Error. Try after some time"), http.StatusInternalServerError
 	}
+	log.Info("7. APITemplateOpenSpec present")
 
 	platform, err := getPlatform(SystemConfigFilePath)
 	if err != nil {
 		return apiError("Could not get platform type"), http.StatusInternalServerError
 	}
+	log.Info("8. getPlatform returned")
 
 	host, err := getInbandIP(SystemConfigFilePath)
 	if err != nil {
 		return apiError("Could not get inband IP"), http.StatusInternalServerError
 	}
+	log.Info("9. getInbandIP returned")
 
 	for service, apis := range ServApis {
 		log.Info("Processing service: ", service)
@@ -420,7 +450,8 @@ func addOrUpdateApi(r *http.Request) (interface{}, int) {
 
 func addOrDeleteJWTKey(e Event) error {
 	var JWTAPIMap = make(map[string]string)
-	c := RedisPool.Get()
+	//c := RedisPool.Get()
+	c := GetRedisConn()
 	defer c.Close()
 
 	apis, err := redis.Strings(c.Do("KEYS", "*"))
@@ -487,8 +518,8 @@ func addOrDeleteJWTKey(e Event) error {
 			} else if count < 3 {
 				log.Warn("Could not verify JWT API Token.. retry")
 			} else {
-				log.Error("Could not add JWT token")
-				return errors.New("Error in updating JWT key")
+				log.Error("Could not add JWT token", jwtMeta.JWTAPIKeyPath)
+				break
 			}
 		}
 	}
@@ -684,8 +715,7 @@ func checkRetry(ctx context.Context, resp *http.Response, err error) (bool, erro
 }
 
 func deleteAPIById(apiID string) (interface{}, int) {
-	c := RedisPool.Get()
-
+	c := GetRedisConn()
 	defer c.Close()
 
 	// Load API Definition from Redis DB
@@ -729,7 +759,9 @@ func deleteAPIById(apiID string) (interface{}, int) {
 }
 
 func deleteAPIByService(service string) (interface{}, int) {
-	c := RedisPool.Get()
+	//c := RedisPool.Get()
+	c := GetRedisConn()
+
 	log.Info("Deleting API from redis for service: ", service)
 
 	defer c.Close()
