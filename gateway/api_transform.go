@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -140,50 +139,52 @@ type CustomMiddleware struct {
 }
 
 func apiLoader(w http.ResponseWriter, r *http.Request) {
+	log.Info("Requesting mutex")
 	m.Lock()
-	{
-		service := mux.Vars(r)["service"]
-		apiName := mux.Vars(r)["apiName"]
-		apiID := service + "-" + apiName
+	defer m.Unlock()
 
-		var obj interface{}
-		var code int
+	service := mux.Vars(r)["service"]
+	apiName := mux.Vars(r)["apiName"]
+	apiID := service + "-" + apiName
 
-		switch r.Method {
-		// GET remains same - Read apis from memory
-		case "GET":
-			if apiName != "" && service != "" {
-				log.Debug("Requesting API definition for", apiID)
-				obj, code = handleGetAPI(apiID)
-			} else {
-				log.Debug("Requesting API list")
-				obj, code = handleGetAPIList()
-			}
-		case "POST":
-			if r.URL.Path == "/key/refresh" {
-				log.Debug("Key refresh")
-				obj, code = updateKeys(ADD)
-			} else if apiName == "" && service == "" {
-				log.Debug("Creating new definition")
-				obj, code = addOrUpdateApi(r)
-			} else {
-				obj, code = apiError("Can not Add/Update service specific APIs. Use /tyk/api or /tyk/key/refresh endpoint"), http.StatusBadRequest
-			}
-		case "DELETE":
-			if apiName != "" && service != "" {
-				log.Info("Deleting API definition for: ", apiID)
-				obj, code = deleteAPIById(apiID)
-			} else if service != "" && apiName == "" {
-				log.Info("Deleting API definition for service: ", service)
-				obj, code = deleteAPIByService(service)
-			} else {
-				obj, code = apiError("Must specify an /service or service/apiName to delete API"), http.StatusBadRequest
-			}
+	var obj interface{}
+	var code int
+
+	switch r.Method {
+	// GET remains same - Read apis from memory
+	case "GET":
+		if apiName != "" && service != "" {
+			log.Debug("Requesting API definition for", apiID)
+			obj, code = handleGetAPI(apiID)
+		} else {
+			log.Debug("Requesting API list")
+			obj, code = handleGetAPIList()
 		}
-
-		doJSONWrite(w, code, obj)
+	case "POST":
+		if r.URL.Path == "/key/refresh" {
+			log.Debug("Key refresh")
+			obj, code = updateKeys(ADD)
+		} else if apiName == "" && service == "" {
+			log.Debug("Creating new definition")
+			obj, code = addOrUpdateApi(r)
+		} else {
+			obj, code = apiError("Can not Add/Update service specific APIs. Use /tyk/api or /tyk/key/refresh endpoint"), http.StatusBadRequest
+		}
+	case "DELETE":
+		if apiName != "" && service != "" {
+			log.Info("Deleting API definition for: ", apiID)
+			obj, code = deleteAPIById(apiID)
+		} else if service != "" && apiName == "" {
+			log.Info("Deleting API definition for service: ", service)
+			obj, code = deleteAPIByService(service)
+		} else {
+			obj, code = apiError("Must specify an /service or service/apiName to delete API"), http.StatusBadRequest
+		}
 	}
-	m.Unlock()
+
+	doJSONWrite(w, code, obj)
+
+	log.Info("Releasing mutex")
 }
 
 func updateKeys(e Event) (interface{}, int) {
@@ -202,7 +203,7 @@ func updateKeys(e Event) (interface{}, int) {
 
 func addOrUpdateApi(r *http.Request) (interface{}, int) {
 	log.Info("Updating/Adding API to redis")
-	c := RedisPool.Get()
+	c := GetRedisConn()
 	defer c.Close()
 
 	if config.Global().UseDBAppConfigs {
@@ -212,13 +213,45 @@ func addOrUpdateApi(r *http.Request) (interface{}, int) {
 
 	var ServApis ServiceAPIS
 
-	if err := json.NewDecoder(r.Body).Decode(&ServApis); err != nil {
+	// Non blocking read or wait for 20 seconds in idle state
+	buf := make([]byte, 1*1024*1024)
+	var data []byte
+	count := 0
+	start := time.Now()
+	log.Debug("Process Request")
+	for {
+		n, err := r.Body.Read(buf)
+		data = Append(data, buf[0:n])
+		count += n
+
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			log.Error("Error reading payload", err)
+			return apiError("Request malformed"), http.StatusInternalServerError
+		}
+
+		t := time.Now()
+		elapsed := t.Sub(start)
+		// kill the connection if process takes more than 20 seconds
+		if elapsed.Nanoseconds()/1000000 > 20000 {
+			log.Error("request timed out")
+			return apiError("Request timedout"), http.StatusInternalServerError
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	log.Debug("Received data length : ", count)
+
+	err := json.Unmarshal(data, &ServApis)
+	if err != nil {
 		log.Error("Couldn't decode new API Definition object: ", err)
 		return apiError("Request malformed"), http.StatusBadRequest
 	}
 
 	//Check if mtls files are present
-	_, err := os.Stat(TykServerCrt)
+	_, err = os.Stat(TykServerCrt)
 	if os.IsNotExist(err) {
 		return apiError("apigw server cert not found. Try after some time"), http.StatusInternalServerError
 	}
@@ -254,7 +287,7 @@ func addOrUpdateApi(r *http.Request) (interface{}, int) {
 	}
 
 	for service, apis := range ServApis {
-		log.Info("Processing service: ", service)
+		log.Debug("Processing service: ", service)
 		for _, api := range apis {
 			var temp map[string]interface{}
 			APIID := service + "-" + api.Name
@@ -420,7 +453,8 @@ func addOrUpdateApi(r *http.Request) (interface{}, int) {
 
 func addOrDeleteJWTKey(e Event) error {
 	var JWTAPIMap = make(map[string]string)
-	c := RedisPool.Get()
+	//c := RedisPool.Get()
+	c := GetRedisConn()
 	defer c.Close()
 
 	apis, err := redis.Strings(c.Do("KEYS", "*"))
@@ -487,8 +521,8 @@ func addOrDeleteJWTKey(e Event) error {
 			} else if count < 3 {
 				log.Warn("Could not verify JWT API Token.. retry")
 			} else {
-				log.Error("Could not add JWT token")
-				return errors.New("Error in updating JWT key")
+				log.Error("Could not add JWT token", jwtMeta.JWTAPIKeyPath)
+				break
 			}
 		}
 	}
@@ -624,7 +658,7 @@ func GetHTTPClient() (*retryablehttp.Client, bool) {
 
 	client := retryablehttp.NewClient()
 	client.HTTPClient = httpClient
-	client.RetryMax = 2
+	client.RetryMax = 3
 	client.RetryWaitMin = 1 * time.Second
 	client.RetryWaitMax = 30 * time.Second
 	client.CheckRetry = checkRetry
@@ -684,8 +718,7 @@ func checkRetry(ctx context.Context, resp *http.Response, err error) (bool, erro
 }
 
 func deleteAPIById(apiID string) (interface{}, int) {
-	c := RedisPool.Get()
-
+	c := GetRedisConn()
 	defer c.Close()
 
 	// Load API Definition from Redis DB
@@ -729,7 +762,9 @@ func deleteAPIById(apiID string) (interface{}, int) {
 }
 
 func deleteAPIByService(service string) (interface{}, int) {
-	c := RedisPool.Get()
+	//c := RedisPool.Get()
+	c := GetRedisConn()
+
 	log.Info("Deleting API from redis for service: ", service)
 
 	defer c.Close()
