@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -140,7 +139,9 @@ type CustomMiddleware struct {
 }
 
 func apiLoader(w http.ResponseWriter, r *http.Request) {
+	log.Info("Requesting mutex")
 	m.Lock()
+	defer m.Unlock()
 	{
 		service := mux.Vars(r)["service"]
 		apiName := mux.Vars(r)["apiName"]
@@ -183,7 +184,6 @@ func apiLoader(w http.ResponseWriter, r *http.Request) {
 
 		doJSONWrite(w, code, obj)
 	}
-	m.Unlock()
 }
 
 func updateKeys(e Event) (interface{}, int) {
@@ -487,8 +487,8 @@ func addOrDeleteJWTKey(e Event) error {
 			} else if count < 3 {
 				log.Warn("Could not verify JWT API Token.. retry")
 			} else {
-				log.Error("Could not add JWT token")
-				return errors.New("Error in updating JWT key")
+				log.Error("Could not add JWT token", jwtMeta.JWTAPIKeyPath)
+				break
 			}
 		}
 	}
