@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -487,8 +486,8 @@ func addOrDeleteJWTKey(e Event) error {
 			} else if count < 3 {
 				log.Warn("Could not verify JWT API Token.. retry")
 			} else {
-				log.Error("Could not add JWT token")
-				return errors.New("Error in updating JWT key")
+				log.Error("Could not add JWT token", jwtMeta.JWTAPIKeyPath)
+				break
 			}
 		}
 	}
