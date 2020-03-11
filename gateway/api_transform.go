@@ -588,7 +588,7 @@ func addOrDeleteJWTKey(e Event) error {
 	for _, jwtMeta := range jwtDefinitions.JWTDefinitions {
 		count := 0
 		for {
-			time.Sleep(1 * time.Second)
+			time.Sleep(2 * time.Second)
 			ret := processJWTApiKey(tykConf, JWTAPIMap, jwtMeta.JWTPublicKeyPath, jwtMeta.JWTAPIKeyPath, "localhost", e)
 			count++
 			if ret == true {
@@ -645,6 +645,15 @@ func processJWTApiKey(tykConf map[string]interface{},
 	template["access_rights"] = APIList
 	template["jwt_data"].(map[string]interface{})["secret"] = string(JWTPublicKey)
 	outputJSON, _ := json.Marshal(template)
+	JWTKey := strings.TrimSuffix(string(JWTApiKey), "\n")
+
+	//Check if key is present - if present then issue PUT else issue POST
+	method := "PUT"
+	present := checkIfJwtKeyCreated(tykConf, JWTKey, host)
+	if !present {
+		log.Info(fmt.Sprintf("Key Not Found - Creating key %s for the first time ", JWTKey))
+		method = "POST"
+	}
 
 	//Create Token
 	client, ret := GetHTTPClient()
@@ -652,13 +661,11 @@ func processJWTApiKey(tykConf map[string]interface{},
 		return ret
 	}
 
-	JWTKey := strings.TrimSuffix(string(JWTApiKey), "\n")
-
 	var endPoint = getTykEndpoint(host, TykJWTAPIKeyEndpoint) + JWTKey
 
 	// Update JWT key if adding new JWT API or deleting an JWT api from exsiting list
 	if (e == ADD && len(jwtAPIMap) > 0) || (e == DELETE && len(jwtAPIMap) > 0) {
-		req, err := retryablehttp.NewRequest("POST", endPoint, bytes.NewReader(outputJSON))
+		req, err := retryablehttp.NewRequest(method, endPoint, bytes.NewReader(outputJSON))
 		if err != nil {
 			log.Error("Error creating jwt api key POST request", err)
 			return false
@@ -666,6 +673,12 @@ func processJWTApiKey(tykConf map[string]interface{},
 
 		req.Header.Add("X-Tyk-Authorization", tykConf["secret"].(string))
 		log.Info("Creating JWT Token: ", string(JWTApiKey))
+
+		//Suppress quota reset
+		q := req.URL.Query()
+		q.Add("suppress_reset", "1")
+		req.URL.RawQuery = q.Encode()
+
 		resp, err := client.Do(req)
 		if err != nil {
 			log.Error("Error in jwt api key POST", err)
@@ -699,6 +712,11 @@ func processJWTApiKey(tykConf map[string]interface{},
 		}
 
 		req.Header.Add("X-Tyk-Authorization", tykConf["secret"].(string))
+		//Suppress quota reset
+		q := req.URL.Query()
+		q.Add("suppress_reset", "1")
+		req.URL.RawQuery = q.Encode()
+
 		log.Info("Deleting JWT Token:", string(JWTApiKey))
 		resp, err := client.Do(req)
 		if err != nil {
