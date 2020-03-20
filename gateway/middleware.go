@@ -120,8 +120,19 @@ func createMiddleware(actualMW TykMiddleware) func(http.Handler) http.Handler {
 			if err != nil {
 				//redirect on missing or invalid JWT
 				if config.Global().EnableRedirect && mw.Name() == "JWTMiddleware" {
+					resetCookie := config.Global().RedirectResetCookie
+					if resetCookie == "" {
+						resetCookie = "AuthCookie"
+					}
+
 					var redirectUrl = "https://" + r.Host + config.Global().RedirectURL
-					mw.Logger().WithError(err).WithField("code", errCode).WithField("Redirect URL", redirectUrl).Debug("JWT Error. Redirecting..")
+					mw.Logger().WithError(err).WithField("code", errCode).WithField("Redirect URL", redirectUrl).Error("JWT Error. Redirecting..")
+					cookie := http.Cookie{
+						Name:   resetCookie,
+						Value:  "",
+						MaxAge: 0,
+					}
+					http.SetCookie(w, &cookie)
 					http.Redirect(w, r, redirectUrl, http.StatusFound)
 					return
 				}
