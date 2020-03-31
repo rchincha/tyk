@@ -15,6 +15,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -525,6 +527,70 @@ func httpTransport(timeOut float64, rw http.ResponseWriter, req *http.Request, p
 	return transport
 }
 
+func (p *ReverseProxy) verifyRootCA(tlsConfig *tls.Config, hostName string) {
+	tlsConfig.InsecureSkipVerify = true
+
+	// if verifyPeerCertificate was set previously, make sure it is also executed
+	prevFunc := tlsConfig.VerifyPeerCertificate
+	tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		if prevFunc != nil {
+			err := prevFunc(rawCerts, verifiedChains)
+			if err != nil {
+				log.Error("Failed to verify server certificate: " + err.Error())
+				return err
+			}
+		}
+
+		// followed https://github.com/golang/go/issues/21971#issuecomment-332693931
+		certs := make([]*x509.Certificate, len(rawCerts))
+		for i, asn1Data := range rawCerts {
+			cert, err := x509.ParseCertificate(asn1Data)
+			if err != nil {
+				return errors.New("failed to parse certificate from server: " + err.Error())
+			}
+			certs[i] = cert
+		}
+
+		if !p.TykAPISpec.Proxy.Transport.SSLInsecureSkipVerify && !config.Global().ProxySSLInsecureSkipVerify {
+			if p.TykAPISpec.Proxy.Transport.SSLForceRootCACheck && config.Global().SSLForceRootCACheck {
+				//Read RootCA and Validate
+				roots := x509.NewCertPool()
+				rootCA, err := ioutil.ReadFile(config.Global().SSLRootCACert)
+				if err != nil {
+					return errors.New("Could not open rootca file")
+				}
+				ok := roots.AppendCertsFromPEM([]byte(rootCA))
+				if !ok {
+					return fmt.Errorf("Counld not decode rootCA: %s", config.Global().SSLRootCACert)
+				}
+
+				tlsConfig.RootCAs = roots
+			}
+
+			opts := x509.VerifyOptions{
+				Roots:         tlsConfig.RootCAs,
+				CurrentTime:   time.Now(),
+				DNSName:       "", // <- skip hostname verification
+				Intermediates: x509.NewCertPool(),
+			}
+
+			for i, cert := range certs {
+				if i == 0 {
+					continue
+				}
+				opts.Intermediates.AddCert(cert)
+			}
+			_, err := certs[0].Verify(opts)
+			if err != nil {
+				log.Error("Failed to verify server certificate: " + err.Error())
+				return err
+			}
+		}
+
+		return nil
+	}
+}
+
 func (p *ReverseProxy) WrappedServeHTTP(rw http.ResponseWriter, req *http.Request, withCache bool) *http.Response {
 	if trace.IsEnabled() {
 		span, ctx := trace.Span(req.Context(), req.URL.Path)
@@ -673,6 +739,21 @@ func (p *ReverseProxy) WrappedServeHTTP(rw http.ResponseWriter, req *http.Reques
 		roundTripper.(*http.Transport).TLSClientConfig.Certificates = tlsCertificates
 	}
 	p.TykAPISpec.Unlock()
+
+	//Validate RootCA
+	if config.Global().SSLForceRootCACheck && !outReqIsWebsocket {
+		// DialTLS is not executed if proxy is used
+		httpTransport := roundTripper.(*http.Transport)
+
+		log.Debug("Using forced SSL RootCA check")
+
+		if proxyURL, _ := httpTransport.Proxy(req); proxyURL != nil {
+			log.Debug("Detected proxy: " + proxyURL.String())
+			tlsConfig := httpTransport.TLSClientConfig
+			host, _, _ := net.SplitHostPort(outreq.Host)
+			p.verifyRootCA(tlsConfig, host)
+		}
+	}
 
 	// do request round trip
 	var res *http.Response
